@@ -39,10 +39,6 @@ async def async_setup_entry(
         f"{__name__}.{mac_loggable(config.address).replace(':', '_')}"
     )
 
-    if config.use_encryption is True:
-        logger.info("Controls are disabled on encrypted devices")
-        return None
-
     if config is None or not isinstance(coordinator, PollingCoordinator):
         logger.error("No coordinator found")
         return None
@@ -67,6 +63,7 @@ async def async_setup_entry(
                 device_info,
                 field,
                 lock,
+                use_encryption=config.use_encryption,
                 category=category,
                 logger=logger,
             )
@@ -86,6 +83,7 @@ class BluettiSelect(CoordinatorEntity, SelectEntity):
         device_info: DeviceInfo,
         field: SelectField,
         lock: asyncio.Lock,
+        use_encryption: bool = False,
         category: EntityCategory | None = None,
         logger: logging.Logger = logging.getLogger(),
     ):
@@ -101,6 +99,7 @@ class BluettiSelect(CoordinatorEntity, SelectEntity):
         self._response_key = field.name
         self._unavailable_counter = 5
         self._lock = lock
+        self._use_encryption = use_encryption
         self._attr_options = [e.name for e in field.e]
 
         self._attr_has_entity_name = True
@@ -190,6 +189,18 @@ class BluettiSelect(CoordinatorEntity, SelectEntity):
         """Write to device."""
 
         try:
+            if self._use_encryption:
+                # Encrypted devices need the full connect/notify/handshake
+                # session DeviceReader already maintains for polling, so
+                # route the write through the coordinator's reader instead
+                # of opening a second, unencrypted connection.
+                async with async_timeout.timeout(15):
+                    await self.coordinator.reader.write(self._field.name, state)
+                    await asyncio.sleep(5)
+
+                await self.coordinator.async_request_refresh()
+                return
+
             device = await BleakScanner.find_device_by_address(self._address, timeout=5)
 
             if device is None:
